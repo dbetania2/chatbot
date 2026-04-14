@@ -1,71 +1,81 @@
+import fs from "fs";
 import path from "path";
-import { TextLoader } from "langchain/document_loaders/fs/text";
-import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
-import { MemoryVectorStore } from "langchain/vectorstores/memory";
-import { HuggingFaceTransformersEmbeddings } from "@langchain/community/embeddings/hf_transformers";
+import { pipeline } from "@xenova/transformers";
 
-let vectorStorePromise = null;
+/**
+ * 📦 CARGA SEGURA DE EMBEDDINGS (compatible con Vercel + Node ESM)
+ */
+const embeddingsData = JSON.parse(
+  fs.readFileSync(
+    path.join(process.cwd(), "data/embeddings.json"),
+    "utf-8"
+  )
+);
 
-export async function initVectorStore() {
-  if (vectorStorePromise) return vectorStorePromise;
+/**
+ * 🔥 Lazy loader del modelo (evita cargarlo si no se usa)
+ */
+let embedderPromise = null;
 
-  vectorStorePromise = (async () => {
-    try {
-      // ✅ FIX CRÍTICO: path absoluto compatible con Vercel
-      const filePath = path.join(process.cwd(), "data/info.md");
-
-      const loader = new TextLoader(filePath);
-      const docs = await loader.load();
-
-      const splitter = RecursiveCharacterTextSplitter.fromLanguage("markdown", {
-        chunkSize: 500,
-        chunkOverlap: 50,
-      });
-
-      const splitDocs = await splitter.splitDocuments(docs);
-
-      const embeddings = new HuggingFaceTransformersEmbeddings({
-        modelName: "Xenova/all-MiniLM-L6-v2",
-      });
-
-      const store = await MemoryVectorStore.fromDocuments(
-        splitDocs,
-        embeddings
-      );
-
-      return store;
-
-    } catch (error) {
-      console.error("❌ Error inicializando vector store:", error);
-
-      // reset para reintento limpio
-      vectorStorePromise = null;
-
-      throw error;
-    }
-  })();
-
-  return vectorStorePromise;
+async function getEmbedder() {
+  if (!embedderPromise) {
+    embedderPromise = pipeline(
+      "feature-extraction",
+      "Xenova/all-MiniLM-L6-v2"
+    );
+  }
+  return embedderPromise;
 }
 
+/**
+ * 📊 Cosine similarity (núcleo del sistema RAG)
+ */
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  let normA = 0;
+  let normB = 0;
+
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB));
+}
+
+/**
+ * 🧠 CONTEXTO INTELIGENTE (REEMPLAZO FINAL DE VECTOR STORE)
+ */
 export async function getRelevantContext(question) {
   try {
     if (!question) return "";
 
-    const store = await initVectorStore();
+    // 1. generar embedding del input
+    const embedder = await getEmbedder();
 
-    const results = await store.similaritySearchWithScore(question, 3);
+    const output = await embedder(question, {
+      pooling: "mean",
+      normalize: true,
+    });
 
-    if (!results || results.length === 0) return "";
+    const queryEmbedding = Array.from(output.data);
 
-    const validContexts = results
-      .filter(([doc, score]) => score > 0.5)
-      .map(([doc]) => doc.pageContent);
+    // 2. comparar contra embeddings precomputados
+    const scored = embeddingsData.map((item) => ({
+      text: item.text,
+      score: cosineSimilarity(queryEmbedding, item.embedding),
+    }));
 
-    return validContexts.join("\n");
+    // 3. ordenar y devolver top 3
+    return scored
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 3)
+      .map((i) => i.text)
+      .join("\n");
 
   } catch (error) {
-    console.error("❌ Error al buscar contexto:", error);
+    console.error("❌ Error en getRelevantContext:", error);
     return "";
   }
 }
