@@ -8,55 +8,82 @@ import { limiter } from "../middleware/rateLimit.js";
 
 const app = express();
 
-// 1. seguridad: protege cabeceras http
+/* ─────────────────────────────
+   1. seguridad headers HTTP
+───────────────────────────── */
 app.use(helmet());
 
-// 2. seguridad: configura cors (en produccion, cambia "*" por la url de tu portfolio)
-app.use(cors({
-  origin: process.env.CORS_ORIGIN || "*",
-  methods: ["POST"]
-}));
+/* ─────────────────────────────
+   2. CORS estricto (PRODUCCIÓN)
+   - bloquea si no coincide exactamente
+   - sin wildcard fallback
+───────────────────────────── */
+const allowedOrigin = process.env.CORS_ORIGIN;
 
-// 3. utilidad: parseo de json en body
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      // permite requests sin origin (postman / server-to-server)
+      if (!origin) return callback(null, false);
+
+      // si no está configurado, bloquear todo
+      if (!allowedOrigin) {
+        return callback(new Error("CORS no configurado"), false);
+      }
+
+      // match exacto
+      if (origin === allowedOrigin) {
+        return callback(null, true);
+      }
+
+      // bloqueado
+      return callback(new Error("Bloqueado por CORS"), false);
+    },
+    methods: ["POST"],
+  })
+);
+
+/* ─────────────────────────────
+   3. parseo JSON
+───────────────────────────── */
 app.use(express.json());
 
-// 4. endpoint protegido con el limitador de requests
+/* ─────────────────────────────
+   4. endpoint chatbot
+───────────────────────────── */
 app.post("/chat", limiter, async (req, res) => {
   try {
     const { message } = req.body;
 
-    // validacion basica antes de gastar recursos
+    // validación básica
     if (!message || typeof message !== "string") {
-      return res.status(400).json({ 
-        success: false, 
-        error: "mensaje invalido o vacio" 
+      return res.status(400).json({
+        success: false,
+        error: "mensaje invalido o vacio",
       });
     }
 
-    // llamada al orquestador
+    // lógica del bot
     const result = await askBot(message);
 
-    // si el bot detecta un error (ej. pregunta muy larga)
     if (!result.success) {
       return res.status(400).json({
         success: false,
-        error: result.error
+        error: result.error,
       });
     }
 
-    // respuesta exitosa para el frontend
-    return res.json({ 
-      success: true, 
-      data: result.data 
+    return res.json({
+      success: true,
+      data: result.data,
     });
 
   } catch (error) {
     console.error("error critico en endpoint /chat:", error);
-    
-    // error general del servidor
+
     return res.status(500).json({
       success: false,
-      error: "error interno del servidor"
+      error: "error interno del servidor",
     });
   }
 });
